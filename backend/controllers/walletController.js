@@ -162,6 +162,14 @@ const transferMoney = async (req,res) => {
     try{
         const { receiverWalletId , amount} = req.body;
 
+        const idempotencyKey = req.headers["idempotency-key"]; // get idempotent key
+
+        if (!idempotencyKey) { // validate the key we gott header
+            return res.status(400).json({
+                message: "Idempotency key is required"
+            });
+        }
+
         if(!amount || amount<=0){
             return res.status(400).json({
                 message : "Transfer amount must be greater than 0"
@@ -174,17 +182,20 @@ const transferMoney = async (req,res) => {
         
         await client.query("BEGIN");   
 
-        // const walletsResult = await client.query(
-        //     `SELECT id, balance
-        //     FROM wallets
-        //     WHERE id IN (
-        //         (SELECT id FROM wallets WHERE user_id = $1),
-        //         $2
-        //     )
-        //     ORDER BY id
-        //     FOR UPDATE`,
-        //     [senderUserId, receiverWalletId]
-        // );
+        const idempotencyResult = await client.query( // then insert the key if not there already
+            `INSERT INTO idempotency_keys (user_id , idempotency_key)
+            VALUES ($1 , $2)
+            ON CONFLICT (user_id , idempotency_key) DO NOTHING RETURNING id` ,
+            [senderUserId,idempotencyKey]
+        )
+
+        if(idempotencyResult.rows.length === 0){ // if already there we rollback
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                message: "Duplicate request"
+            });
+        }
         
         const senderResult = await client.query(
             `SELECT id, balance
@@ -427,3 +438,21 @@ module.exports = {
 // Transfer B
 //    ↓
 // waits for the lock
+
+
+
+
+// idempotency - key : -----------------------------------------------------------------------------
+
+// Request
+//    ↓
+// BEGIN
+//    ↓
+// Try to INSERT idempotency key
+//    ↓
+// Already exists?
+//    ├── YES → duplicate request
+//    └── NO  → continue transfer
+
+// // REMEMBER - > Aditya + abc123 → already exists 
+// Arnav  + abc123 → different combination → allowed 
